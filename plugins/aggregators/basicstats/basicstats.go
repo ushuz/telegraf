@@ -9,10 +9,11 @@ import (
 )
 
 type BasicStats struct {
-	Stats []string `toml:"stats"`
+	Stats  []string            `toml:"stats"`
+	Fields map[string][]string `toml:"fields"`
 
-	cache       map[uint64]aggregate
-	statsConfig *configuredStats
+	cache   map[uint64]aggregate
+	configs map[string]configuredStats
 }
 
 type configuredStats struct {
@@ -90,11 +91,10 @@ func (m *BasicStats) Add(in telegraf.Metric) {
 }
 
 func (m *BasicStats) Push(acc telegraf.Accumulator) {
-	config := getConfiguredStats(m)
-
 	for _, aggregate := range m.cache {
 		fields := map[string]interface{}{}
 		for k, v := range aggregate.fields {
+			config := m.getConfiguredStatsForField(k)
 
 			if config.count {
 				fields[k+"_count"] = v.Count()
@@ -129,13 +129,13 @@ func (m *BasicStats) Push(acc telegraf.Accumulator) {
 	}
 }
 
-func parseStats(names []string) *configuredStats {
+func parseStats(stats []string) configuredStats {
 
-	parsed := &configuredStats{}
+	parsed := configuredStats{}
 
-	for _, name := range names {
+	for _, stat := range stats {
 
-		switch name {
+		switch stat {
 
 		case "count":
 			parsed.count = true
@@ -153,40 +153,47 @@ func parseStats(names []string) *configuredStats {
 			parsed.sum = true
 
 		default:
-			log.Printf("W! Unrecognized basic stat '%s', ignoring", name)
+			log.Printf("W! Unrecognized basic stat '%s', ignoring", stat)
 		}
 	}
 
 	return parsed
 }
 
-func defaultStats() *configuredStats {
+func (m *BasicStats) getConfiguredStatsForField(field string) configuredStats {
+	DEFAULT_FIELD := "*"
+	DEFAULT_STATS := []string{"count", "min", "max", "mean", "s2", "stdev"}
 
-	defaults := &configuredStats{}
+	if m.configs == nil {
 
-	defaults.count = true
-	defaults.min = true
-	defaults.max = true
-	defaults.mean = true
-	defaults.variance = true
-	defaults.stdev = true
-	defaults.sum = false
+		if m.Fields == nil {
+			m.Fields = make(map[string][]string)
 
-	return defaults
-}
+			if m.Stats == nil {
+				// neither m.Fileds nor m.Stats provided, use DEFAULT_STATS
+				m.Fields[DEFAULT_FIELD] = DEFAULT_STATS
+			} else {
+				// make m.Stats default for all fields
+				m.Fields[DEFAULT_FIELD] = m.Stats
+			}
+		}
+		// m.Fields provided, m.Stats ignored
 
-func getConfiguredStats(m *BasicStats) *configuredStats {
+		m.configs = make(map[string]configuredStats)
 
-	if m.statsConfig == nil {
-
-		if m.Stats == nil {
-			m.statsConfig = defaultStats()
-		} else {
-			m.statsConfig = parseStats(m.Stats)
+		for k, stats := range m.Fields {
+			m.configs[k] = parseStats(stats)
 		}
 	}
 
-	return m.statsConfig
+	if _, ok := m.configs[field]; !ok {
+		// field-specfic stats not found, fallback to DEFAULT_FIELD
+		field = DEFAULT_FIELD
+	}
+	// it's OK if DEFAULT_FIELD is not specified, the return below won't
+	// result in any error or aggregated field, which is what we desired
+
+	return m.configs[field]
 }
 
 func (m *BasicStats) Reset() {

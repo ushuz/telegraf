@@ -530,3 +530,49 @@ func TestBasicStatsWithDefaultStats(t *testing.T) {
 	assert.True(t, acc.HasField("m1", "a_s2"))
 	assert.False(t, acc.HasField("m1", "a_sum"))
 }
+
+// Test that if Fields works as expected. We want to maintain backwards compatibility,
+// otherwise user's working systems will suddenly (and surprisingly) start
+// capturing sum without their input.
+func TestBasicStatsFields(t *testing.T) {
+
+	aggregator := NewBasicStats()
+	aggregator.Fields = map[string][]string{
+		"a": {"count"},
+		"b": {"min", "max"},
+		"c": {},
+		"d": {},
+		"e": {},
+		"f": {},
+	}
+
+	aggregator.Add(m1)
+	aggregator.Add(m2)
+
+	acc := testutil.Accumulator{}
+	aggregator.Push(&acc)
+
+	assert.True(t, acc.HasField("m1", "a_count"))
+	assert.False(t, acc.HasField("m1", "a_min"))
+	assert.False(t, acc.HasField("m1", "a_max"))
+	assert.False(t, acc.HasField("m1", "a_mean"))
+	assert.False(t, acc.HasField("m1", "a_stdev"))
+	assert.False(t, acc.HasField("m1", "a_s2"))
+	assert.False(t, acc.HasField("m1", "a_sum"))
+
+	assert.False(t, acc.HasField("m1", "b_count"))
+	assert.True(t, acc.HasField("m1", "b_min"))
+	assert.True(t, acc.HasField("m1", "b_max"))
+	assert.False(t, acc.HasField("m1", "b_mean"))
+	assert.False(t, acc.HasField("m1", "b_stdev"))
+	assert.False(t, acc.HasField("m1", "b_s2"))
+	assert.False(t, acc.HasField("m1", "b_sum"))
+
+	assert.False(t, acc.HasField("m1", "c_count"))
+	assert.False(t, acc.HasField("m1", "c_min"))
+	assert.False(t, acc.HasField("m1", "c_max"))
+	assert.False(t, acc.HasField("m1", "c_mean"))
+	assert.False(t, acc.HasField("m1", "c_stdev"))
+	assert.False(t, acc.HasField("m1", "c_s2"))
+	assert.False(t, acc.HasField("m1", "c_sum"))
+}

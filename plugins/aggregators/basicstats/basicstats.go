@@ -2,10 +2,10 @@ package basicstats
 
 import (
 	"log"
-	"math"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/aggregators"
+	"github.com/influxdata/telegraf/plugins/inputs/statsd"
 )
 
 type BasicStats struct {
@@ -32,18 +32,9 @@ func NewBasicStats() *BasicStats {
 }
 
 type aggregate struct {
-	fields map[string]basicstats
+	fields map[string]statsd.RunningStats
 	name   string
 	tags   map[string]string
-}
-
-type basicstats struct {
-	count float64
-	min   float64
-	max   float64
-	sum   float64
-	mean  float64
-	M2    float64 //intermedia value for variance/stdev
 }
 
 var sampleConfig = `
@@ -62,7 +53,7 @@ func (m *BasicStats) SampleConfig() string {
 }
 
 func (m *BasicStats) Description() string {
-	return "Keep the aggregate basicstats of each metric passing through."
+	return "Keep the aggregate statsd.RunningStats of each metric passing through."
 }
 
 func (m *BasicStats) Add(in telegraf.Metric) {
@@ -72,18 +63,13 @@ func (m *BasicStats) Add(in telegraf.Metric) {
 		a := aggregate{
 			name:   in.Name(),
 			tags:   in.Tags(),
-			fields: make(map[string]basicstats),
+			fields: make(map[string]statsd.RunningStats),
 		}
 		for _, field := range in.FieldList() {
 			if fv, ok := convert(field.Value); ok {
-				a.fields[field.Key] = basicstats{
-					count: 1,
-					min:   fv,
-					max:   fv,
-					mean:  fv,
-					sum:   fv,
-					M2:    0.0,
-				}
+				rs := statsd.RunningStats{}
+				rs.AddValue(fv)
+				a.fields[field.Key] = rs
 			}
 		}
 		m.cache[id] = a
@@ -92,43 +78,12 @@ func (m *BasicStats) Add(in telegraf.Metric) {
 			if fv, ok := convert(field.Value); ok {
 				if _, ok := m.cache[id].fields[field.Key]; !ok {
 					// hit an uncached field of a cached metric
-					m.cache[id].fields[field.Key] = basicstats{
-						count: 1,
-						min:   fv,
-						max:   fv,
-						mean:  fv,
-						sum:   fv,
-						M2:    0.0,
-					}
-					continue
+					m.cache[id].fields[field.Key] = statsd.RunningStats{}
 				}
 
-				tmp := m.cache[id].fields[field.Key]
-				//https://en.m.wikipedia.org/wiki/Algorithms_for_calculating_variance
-				//variable initialization
-				x := fv
-				mean := tmp.mean
-				M2 := tmp.M2
-				//counter compute
-				n := tmp.count + 1
-				tmp.count = n
-				//mean compute
-				delta := x - mean
-				mean = mean + delta/n
-				tmp.mean = mean
-				//variance/stdev compute
-				M2 = M2 + delta*(x-mean)
-				tmp.M2 = M2
-				//max/min compute
-				if fv < tmp.min {
-					tmp.min = fv
-				} else if fv > tmp.max {
-					tmp.max = fv
-				}
-				//sum compute
-				tmp.sum += fv
-				//store final data
-				m.cache[id].fields[field.Key] = tmp
+				rs := m.cache[id].fields[field.Key]
+				rs.AddValue(fv)
+				m.cache[id].fields[field.Key] = rs
 			}
 		}
 	}
@@ -142,33 +97,30 @@ func (m *BasicStats) Push(acc telegraf.Accumulator) {
 		for k, v := range aggregate.fields {
 
 			if config.count {
-				fields[k+"_count"] = v.count
+				fields[k+"_count"] = v.Count()
 			}
 			if config.min {
-				fields[k+"_min"] = v.min
+				fields[k+"_min"] = v.Lower()
 			}
 			if config.max {
-				fields[k+"_max"] = v.max
+				fields[k+"_max"] = v.Upper()
 			}
 			if config.mean {
-				fields[k+"_mean"] = v.mean
+				fields[k+"_mean"] = v.Mean()
 			}
 			if config.sum {
-				fields[k+"_sum"] = v.sum
+				fields[k+"_sum"] = v.Sum()
 			}
 
-			//v.count always >=1
-			if v.count > 1 {
-				variance := v.M2 / (v.count - 1)
-
+			// backward compatibility
+			if v.Count() > 1 {
 				if config.variance {
-					fields[k+"_s2"] = variance
+					fields[k+"_s2"] = v.Variance()
 				}
 				if config.stdev {
-					fields[k+"_stdev"] = math.Sqrt(variance)
+					fields[k+"_stdev"] = v.Stddev()
 				}
 			}
-			//if count == 1 StdDev = infinite => so I won't send data
 		}
 
 		if len(fields) > 0 {

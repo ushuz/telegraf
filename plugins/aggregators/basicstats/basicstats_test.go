@@ -422,6 +422,47 @@ func TestBasicStatsWithMinAndMax(t *testing.T) {
 	acc.AssertContainsTaggedFields(t, "m1", expectedFields, expectedTags)
 }
 
+// Test only aggregating percentiles
+func TestBasicStatsWithPercentiles(t *testing.T) {
+
+	aggregator := NewBasicStats()
+	aggregator.Fields = map[string][]string{
+		"*": {"p95", "p80"},
+	}
+
+	for i := 1; i <= 100; i++ {
+		var m, _ = metric.New("m1",
+			map[string]string{"foo": "bar"},
+			map[string]interface{}{
+				"a": int64(i),
+				"b": int64(101 - i),
+				"c": float64(i * 2),
+				"d": float64(i / 3),
+			},
+			time.Now(),
+		)
+		aggregator.Add(m)
+	}
+
+	acc := testutil.Accumulator{}
+	aggregator.Push(&acc)
+
+	expectedFields := map[string]interface{}{
+		"a_p95": float64(96),
+		"a_p80": float64(81),
+		"b_p95": float64(96),
+		"b_p80": float64(81),
+		"c_p95": float64(192),
+		"c_p80": float64(162),
+		"d_p95": float64(32),
+		"d_p80": float64(27),
+	}
+	expectedTags := map[string]string{
+		"foo": "bar",
+	}
+	acc.AssertContainsTaggedFields(t, "m1", expectedFields, expectedTags)
+}
+
 // Test aggregating with all stats
 func TestBasicStatsWithAllStats(t *testing.T) {
 	acc := testutil.Accumulator{}

@@ -2,6 +2,8 @@ package basicstats
 
 import (
 	"log"
+	"regexp"
+	"strconv"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/aggregators"
@@ -17,13 +19,14 @@ type BasicStats struct {
 }
 
 type configuredStats struct {
-	count    bool
-	min      bool
-	max      bool
-	mean     bool
-	variance bool
-	stdev    bool
-	sum      bool
+	count       bool
+	min         bool
+	max         bool
+	mean        bool
+	variance    bool
+	stdev       bool
+	sum         bool
+	percentiles []int
 }
 
 func NewBasicStats() *BasicStats {
@@ -112,6 +115,10 @@ func (m *BasicStats) Push(acc telegraf.Accumulator) {
 				fields[k+"_sum"] = v.Sum()
 			}
 
+			for _, p := range config.percentiles {
+				fields[k+"_p"+strconv.Itoa(p)] = v.Percentile(p)
+			}
+
 			// backward compatibility
 			if v.Count() > 1 {
 				if config.variance {
@@ -131,9 +138,20 @@ func (m *BasicStats) Push(acc telegraf.Accumulator) {
 
 func parseStats(stats []string) configuredStats {
 
+	PRECENTILE_PATTERN := regexp.MustCompile(`^p([0-9]|[1-9][0-9]|100)$`)
+
 	parsed := configuredStats{}
 
 	for _, stat := range stats {
+
+		// parse percentile stats, e.g. "p90" "p95"
+		match := PRECENTILE_PATTERN.FindStringSubmatch(stat)
+		if len(match) >= 2 {
+			if p, err := strconv.Atoi(match[1]); err == nil {
+				parsed.percentiles = append(parsed.percentiles, p)
+				continue
+			}
+		}
 
 		switch stat {
 

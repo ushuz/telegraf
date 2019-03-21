@@ -48,8 +48,19 @@ var sampleConfig = `
   ## aggregator and will not get sent to the output plugins.
   drop_original = false
 
-  ## Configures which basic stats to push as fields
+  ## Configures which basic stats to push as fields. This option
+  ## is deprecated and only kept for backward compatibility. If any
+  ## fields is configured, this option will be ignored.
   # stats = ["count", "min", "max", "mean", "stdev", "s2", "sum"]
+
+  ## Configures which basic stats to push as fields. "*" is the default configuration for all fields.
+  ## Use strings like "p95" to add 95th percentile. Supported percentile range is [0, 100].
+  # [aggregators.basicstats.fields]
+  #   "*" = ["count", "min", "max", "mean", "stdev", "s2", "sum"]
+  #   "some_field" = ["count", "p90", "p95"]
+  ## If "*" is not provided, unmatched fields will be ignored.
+  # [aggregators.basicstats.fields]
+  #   "only_field" = ["count", "sum"]
 `
 
 func (m *BasicStats) SampleConfig() string {

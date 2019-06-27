@@ -32,8 +32,8 @@ var sampleConfig = `
 
   ## Alert message template
   # [outputs.skyline.template]
-  #   OK = "[{{ .Now }}] OK: {{ .Monitor.Name }} {{ .Alert.Formula }}"
-  #   ALERT = "[{{ .Now }}] WARN: {{ .Monitor.Name }} {{ .Alert.Formula }}"
+  #   OK = "[{{ .Now }}] OK: {{ .Monitor.Name }} [{{ .EvaluatedFormula }}]"
+  #   ALERT = "[{{ .Now }}] WARN: {{ .Monitor.Name }} [{{ .EvaluatedFormula }}]"
 
   ## Configuration for monitors and alerts
   [[outputs.skyline.monitors]]
@@ -51,8 +51,8 @@ var sampleConfig = `
 const (
 	defaultClientTimeout = 5 * time.Second
 	defaultContentType   = "text/plain; charset=utf-8"
-	defaultTemplateOK    = "[{{ .Now }}] OK: {{ .Monitor.Name }} {{ .Alert.Formula }}"
-	defaultTemplateALERT = "[{{ .Now }}] WARN: {{ .Monitor.Name }} {{ .Alert.Formula }}"
+	defaultTemplateOK    = "[{{ .Now }}] OK: {{ .Monitor.Name }} [{{ .EvaluatedFormula }}]"
+	defaultTemplateALERT = "[{{ .Now }}] WARN: {{ .Monitor.Name }} [{{ .EvaluatedFormula }}]"
 )
 
 func getFloat(v interface{}) (float64, error) {
@@ -80,6 +80,15 @@ func getFloat(v interface{}) (float64, error) {
 	}
 }
 
+func shortenNumber(v interface{}) string {
+	fv := v.(float64)
+	if fv < 1000 {
+		return fmt.Sprintf("%v", v)
+	}
+	exp := uint(math.Log(fv) / math.Log(1000))
+	return fmt.Sprintf("%.1f%c", fv/math.Pow(1000, float64(exp)), "kmgtpe"[exp-1])
+}
+
 // Alert holds alert formula and alerting state
 type Alert struct {
 	Formula    string
@@ -89,12 +98,19 @@ type Alert struct {
 }
 
 // Evaluate returns formula evaluation result
-func (a *Alert) Evaluate(params map[string]interface{}) bool {
+func (a *Alert) Evaluate(params map[string]interface{}) (bool, string) {
+	s := a.Formula
+	for _, v := range a.expression.Vars() {
+		val, ok := params[v]
+		if ok {
+			s = strings.ReplaceAll(s, v, fmt.Sprintf("%s(%v)", v, shortenNumber(val)))
+		}
+	}
 	result, err := a.expression.Evaluate(params)
 	if err != nil {
-		return false
+		return false, s
 	}
-	return result.(bool)
+	return result.(bool), s
 }
 
 // Monitor monitors a group endpoints filtered by host and uri
@@ -211,13 +227,13 @@ func (m *Monitor) ShowAlerts(template *TemplateConfig) []string {
 	// evaluate each alert
 	var outputs []string
 	for _, alert := range m.alerts {
-		shouldAlert := alert.Evaluate(params)
+		shouldAlert, evalueatedFormula := alert.Evaluate(params)
 		if shouldAlert {
 			alert.IsAlerting = true
-			outputs = append(outputs, RenderTemplate(template.tALERT, m, alert))
+			outputs = append(outputs, RenderTemplate(template.tALERT, m, alert, evalueatedFormula))
 		} else if alert.IsAlerting {
 			alert.IsAlerting = false
-			outputs = append(outputs, RenderTemplate(template.tOK, m, alert))
+			outputs = append(outputs, RenderTemplate(template.tOK, m, alert, evalueatedFormula))
 		}
 	}
 	// reset fields
@@ -226,17 +242,23 @@ func (m *Monitor) ShowAlerts(template *TemplateConfig) []string {
 	return outputs
 }
 
-// Message abstracts properties needed for template rendering
-type Message struct {
-	Now     string
-	Monitor *Monitor
-	Alert   *Alert
+// TemplateMessage abstracts properties needed for template rendering
+type TemplateMessage struct {
+	Now              string
+	Monitor          *Monitor
+	Alert            *Alert
+	EvaluatedFormula string
 }
 
 // RenderTemplate renders alert template based on monitor and alert
-func RenderTemplate(tpl *template.Template, monitor *Monitor, alert *Alert) string {
+func RenderTemplate(tpl *template.Template, monitor *Monitor, alert *Alert, evaluatedFormula string) string {
 	now := time.Now().Format(time.RFC3339)
-	msg := &Message{Now: now, Monitor: monitor, Alert: alert}
+	msg := &TemplateMessage{
+		Now:              now,
+		Monitor:          monitor,
+		Alert:            alert,
+		EvaluatedFormula: evaluatedFormula,
+	}
 	buf := &bytes.Buffer{}
 	tpl.Execute(buf, msg)
 	return buf.String()

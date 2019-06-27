@@ -15,8 +15,8 @@ This plugin sends access log alerts over HTTP.
 
   ## Alert message template
   # [outputs.skyline.template]
-  #   OK = "[{{ .Now }}] OK: {{ .Monitor.Name }} {{ .Alert.Formula }}"
-  #   ALERT = "[{{ .Now }}] WARN: {{ .Monitor.Name }} {{ .Alert.Formula }}"
+  #   OK = "[{{ .Now }}] OK: {{ .Monitor.Name }} [{{ .EvaluatedFormula }}]"
+  #   ALERT = "[{{ .Now }}] WARN: {{ .Monitor.Name }} [{{ .EvaluatedFormula }}]"
 
   ## Configuration for monitors and alerts
   [[outputs.skyline.monitors]]

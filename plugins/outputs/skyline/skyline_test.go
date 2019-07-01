@@ -27,7 +27,7 @@ url = ""
 ## Alert message template
 [template]
   OK = "[{{ .Now }}] GOOD: {{ .Monitor.Name }} [{{ .Alert.Formula }}] [{{ .EvaluatedFormula }}]"
-  ALERT = "[{{ .Now }}] SHIT: {{ .Monitor.Name }} [{{ .Alert.Formula }}] [{{ .EvaluatedFormula }}]"
+  ALERT = "[{{ .Now }}] SHIT: {{ .Monitor.Name }} [{{ .Alert.Formula }}] [{{ .EvaluatedFormula }}] ({{ .Alert.Count }}/{{ .Alert.Threshold }})"
 
 [[monitors]]
   name = "www"
@@ -110,9 +110,8 @@ func AssertRequestBodyContains(t *testing.T, contains string, done chan bool) fu
 	}
 }
 
-func TestSkyline(t *testing.T) {
+func setup(t *testing.T) (*Skyline, *httptest.Server, func()) {
 	ts := httptest.NewServer(http.NotFoundHandler())
-	defer ts.Close()
 
 	u, err := url.Parse(fmt.Sprintf("http://%s", ts.Listener.Addr().String()))
 	require.NoError(t, err)
@@ -124,28 +123,14 @@ func TestSkyline(t *testing.T) {
 	err = plugin.Connect()
 	require.NoError(t, err)
 
-	done := make(chan bool)
+	return plugin, ts, ts.Close
+}
 
-	// 3+3 > 5: OK -> ALERT
-	ts.Config.Handler = http.HandlerFunc(AssertRequestBodyContains(t, "SHIT: www [status_504 > 5] [status_504(6) > 5]", done))
-	err = plugin.Write([]telegraf.Metric{getMetric2(), getMetric2()})
-	require.NoError(t, err)
+func TestSkyline(t *testing.T) {
+	plugin, ts, close := setup(t)
+	defer close()
 
-	<-done
-
-	// 3+3 > 5: ALERT -> ALERT
-	ts.Config.Handler = http.HandlerFunc(AssertRequestBodyContains(t, "SHIT: www [status_504 > 5] [status_504(6) > 5]", done))
-	err = plugin.Write([]telegraf.Metric{getMetric2(), getMetric2()})
-	require.NoError(t, err)
-
-	<-done
-
-	//   3 < 5: ALERT -> OK
-	ts.Config.Handler = http.HandlerFunc(AssertRequestBodyContains(t, "GOOD: www [status_504 > 5] [status_504 > 5]", done))
-	err = plugin.Write([]telegraf.Metric{})
-	require.NoError(t, err)
-
-	<-done
+	var err error
 
 	m := new(Mocked)
 	ts.Config.Handler = http.HandlerFunc(m.RequestHandler)
@@ -155,16 +140,51 @@ func TestSkyline(t *testing.T) {
 	require.NoError(t, err)
 	m.AssertNumberOfCalls(t, "RequestHandler", 0)
 
-	//   3 < 5: OK -> OK
+	// 3 < 5: OK -> OK
 	err = plugin.Write([]telegraf.Metric{getMetric2()})
 	require.NoError(t, err)
 	m.AssertNumberOfCalls(t, "RequestHandler", 0)
 
-	// .9 > .8: OK -> ALERT
+	// 1st 6 < 5: OK -> OK (Count=1)
+	err = plugin.Write([]telegraf.Metric{getMetric2(), getMetric2()})
+	require.NoError(t, err)
+	m.AssertNumberOfCalls(t, "RequestHandler", 0)
+
+	done := make(chan bool)
+
+	// 2nd 6 > 5: OK (Count=1) -> ALERT
+	ts.Config.Handler = http.HandlerFunc(AssertRequestBodyContains(t, "SHIT: www [status_504 > 5] [status_504(6) > 5] (2/2)", done))
+	err = plugin.Write([]telegraf.Metric{getMetric2(), getMetric2()})
+	require.NoError(t, err)
+
+	<-done
+
+	// 3rd 6 > 5: ALERT -> ALERT
+	ts.Config.Handler = http.HandlerFunc(AssertRequestBodyContains(t, "SHIT: www [status_504 > 5] [status_504(6) > 5] (3/2)", done))
+	err = plugin.Write([]telegraf.Metric{getMetric2(), getMetric2()})
+	require.NoError(t, err)
+
+	<-done
+
+	// 3 < 5: ALERT -> OK
+	ts.Config.Handler = http.HandlerFunc(AssertRequestBodyContains(t, "GOOD: www [status_504 > 5] [status_504 > 5]", done))
+	err = plugin.Write([]telegraf.Metric{})
+	require.NoError(t, err)
+
+	<-done
+
+	// 2x .9 > .8: OK -> ALERT
 	ts.Config.Handler = http.HandlerFunc(AssertRequestBodyContains(t, "SHIT: www [rt_p95 > 0.8] [rt_p95(0.9) > 0.8]", done))
+	err = plugin.Write([]telegraf.Metric{getMetric3()})
+	err = plugin.Write([]telegraf.Metric{getMetric3()})
+	err = plugin.Write([]telegraf.Metric{getMetric3()})
+	err = plugin.Write([]telegraf.Metric{getMetric3()})
 	err = plugin.Write([]telegraf.Metric{getMetric3()})
 	require.NoError(t, err)
 
+	<-done
+	<-done
+	<-done
 	<-done
 }
 

@@ -49,10 +49,11 @@ var sampleConfig = `
 `
 
 const (
-	defaultClientTimeout = 5 * time.Second
-	defaultContentType   = "text/plain; charset=utf-8"
-	defaultTemplateOK    = "[{{ .Now }}] OK: {{ .Monitor.Name }} [{{ .EvaluatedFormula }}]"
-	defaultTemplateALERT = "[{{ .Now }}] WARN: {{ .Monitor.Name }} [{{ .EvaluatedFormula }}]"
+	defaultAlertThreshold = 2
+	defaultClientTimeout  = 5 * time.Second
+	defaultContentType    = "text/plain; charset=utf-8"
+	defaultTemplateOK     = "[{{ .Now }}] OK: {{ .Monitor.Name }} [{{ .EvaluatedFormula }}]"
+	defaultTemplateALERT  = "[{{ .Now }}] WARN: {{ .Monitor.Name }} [{{ .EvaluatedFormula }}]"
 )
 
 func getFloat(v interface{}) (float64, error) {
@@ -91,14 +92,17 @@ func shortenNumber(v interface{}) string {
 
 // Alert holds alert formula and alerting state
 type Alert struct {
-	Formula    string
+	Formula   string
+	Threshold uint
+
 	IsAlerting bool
+	Count      uint
 
 	expression *govaluate.EvaluableExpression
 }
 
 // Evaluate returns formula evaluation result
-func (a *Alert) Evaluate(params map[string]interface{}) (bool, string) {
+func (a *Alert) Evaluate(params map[string]interface{}) string {
 	s := a.Formula
 	for _, v := range a.expression.Vars() {
 		val, ok := params[v]
@@ -107,10 +111,14 @@ func (a *Alert) Evaluate(params map[string]interface{}) (bool, string) {
 		}
 	}
 	result, err := a.expression.Evaluate(params)
-	if err != nil {
-		return false, s
+	if err != nil || !result.(bool) {
+		// not triggered
+		a.Count = 0
+	} else {
+		// triggered
+		a.Count++
 	}
-	return result.(bool), s
+	return s
 }
 
 // Monitor monitors a group endpoints filtered by host and uri
@@ -158,6 +166,7 @@ func (m *Monitor) Init() {
 		}
 		alerts[formula] = &Alert{
 			Formula:    formula,
+			Threshold:  defaultAlertThreshold,
 			expression: expr,
 		}
 	}
@@ -227,8 +236,8 @@ func (m *Monitor) ShowAlerts(template *TemplateConfig) []string {
 	// evaluate each alert
 	var outputs []string
 	for _, alert := range m.alerts {
-		shouldAlert, evalueatedFormula := alert.Evaluate(params)
-		if shouldAlert {
+		evalueatedFormula := alert.Evaluate(params)
+		if alert.Count >= alert.Threshold {
 			alert.IsAlerting = true
 			outputs = append(outputs, RenderTemplate(template.tALERT, m, alert, evalueatedFormula))
 		} else if alert.IsAlerting {

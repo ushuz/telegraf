@@ -2,27 +2,31 @@ package basicstats
 
 import (
 	"log"
-	"math"
+	"regexp"
+	"strconv"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/aggregators"
+	"github.com/influxdata/telegraf/plugins/inputs/statsd"
 )
 
 type BasicStats struct {
-	Stats []string `toml:"stats"`
+	Stats  []string            `toml:"stats"`
+	Fields map[string][]string `toml:"fields"`
 
-	cache       map[uint64]aggregate
-	statsConfig *configuredStats
+	cache   map[uint64]aggregate
+	configs map[string]configuredStats
 }
 
 type configuredStats struct {
-	count    bool
-	min      bool
-	max      bool
-	mean     bool
-	variance bool
-	stdev    bool
-	sum      bool
+	count       bool
+	min         bool
+	max         bool
+	mean        bool
+	variance    bool
+	stdev       bool
+	sum         bool
+	percentiles []int
 }
 
 func NewBasicStats() *BasicStats {
@@ -32,18 +36,9 @@ func NewBasicStats() *BasicStats {
 }
 
 type aggregate struct {
-	fields map[string]basicstats
+	fields map[string]statsd.RunningStats
 	name   string
 	tags   map[string]string
-}
-
-type basicstats struct {
-	count float64
-	min   float64
-	max   float64
-	sum   float64
-	mean  float64
-	M2    float64 //intermedia value for variance/stdev
 }
 
 var sampleConfig = `
@@ -53,8 +48,19 @@ var sampleConfig = `
   ## aggregator and will not get sent to the output plugins.
   drop_original = false
 
-  ## Configures which basic stats to push as fields
+  ## Configures which basic stats to push as fields. This option
+  ## is deprecated and only kept for backward compatibility. If any
+  ## fields is configured, this option will be ignored.
   # stats = ["count", "min", "max", "mean", "stdev", "s2", "sum"]
+
+  ## Configures which basic stats to push as fields. "*" is the default configuration for all fields.
+  ## Use strings like "p95" to add 95th percentile. Supported percentile range is [0, 100].
+  # [aggregators.basicstats.fields]
+  #   "*" = ["count", "min", "max", "mean", "stdev", "s2", "sum"]
+  #   "some_field" = ["count", "p90", "p95"]
+  ## If "*" is not provided, unmatched fields will be ignored.
+  # [aggregators.basicstats.fields]
+  #   "only_field" = ["count", "sum"]
 `
 
 func (m *BasicStats) SampleConfig() string {
@@ -62,7 +68,7 @@ func (m *BasicStats) SampleConfig() string {
 }
 
 func (m *BasicStats) Description() string {
-	return "Keep the aggregate basicstats of each metric passing through."
+	return "Keep the aggregate statsd.RunningStats of each metric passing through."
 }
 
 func (m *BasicStats) Add(in telegraf.Metric) {
@@ -72,18 +78,13 @@ func (m *BasicStats) Add(in telegraf.Metric) {
 		a := aggregate{
 			name:   in.Name(),
 			tags:   in.Tags(),
-			fields: make(map[string]basicstats),
+			fields: make(map[string]statsd.RunningStats),
 		}
 		for _, field := range in.FieldList() {
 			if fv, ok := convert(field.Value); ok {
-				a.fields[field.Key] = basicstats{
-					count: 1,
-					min:   fv,
-					max:   fv,
-					mean:  fv,
-					sum:   fv,
-					M2:    0.0,
-				}
+				rs := statsd.RunningStats{}
+				rs.AddValue(fv)
+				a.fields[field.Key] = rs
 			}
 		}
 		m.cache[id] = a
@@ -92,83 +93,52 @@ func (m *BasicStats) Add(in telegraf.Metric) {
 			if fv, ok := convert(field.Value); ok {
 				if _, ok := m.cache[id].fields[field.Key]; !ok {
 					// hit an uncached field of a cached metric
-					m.cache[id].fields[field.Key] = basicstats{
-						count: 1,
-						min:   fv,
-						max:   fv,
-						mean:  fv,
-						sum:   fv,
-						M2:    0.0,
-					}
-					continue
+					m.cache[id].fields[field.Key] = statsd.RunningStats{}
 				}
 
-				tmp := m.cache[id].fields[field.Key]
-				//https://en.m.wikipedia.org/wiki/Algorithms_for_calculating_variance
-				//variable initialization
-				x := fv
-				mean := tmp.mean
-				M2 := tmp.M2
-				//counter compute
-				n := tmp.count + 1
-				tmp.count = n
-				//mean compute
-				delta := x - mean
-				mean = mean + delta/n
-				tmp.mean = mean
-				//variance/stdev compute
-				M2 = M2 + delta*(x-mean)
-				tmp.M2 = M2
-				//max/min compute
-				if fv < tmp.min {
-					tmp.min = fv
-				} else if fv > tmp.max {
-					tmp.max = fv
-				}
-				//sum compute
-				tmp.sum += fv
-				//store final data
-				m.cache[id].fields[field.Key] = tmp
+				rs := m.cache[id].fields[field.Key]
+				rs.AddValue(fv)
+				m.cache[id].fields[field.Key] = rs
 			}
 		}
 	}
 }
 
 func (m *BasicStats) Push(acc telegraf.Accumulator) {
-	config := getConfiguredStats(m)
-
 	for _, aggregate := range m.cache {
 		fields := map[string]interface{}{}
 		for k, v := range aggregate.fields {
+			config := m.getConfiguredStatsForField(k)
 
 			if config.count {
-				fields[k+"_count"] = v.count
+				fields[k+"_count"] = v.Count()
 			}
 			if config.min {
-				fields[k+"_min"] = v.min
+				fields[k+"_min"] = v.Lower()
 			}
 			if config.max {
-				fields[k+"_max"] = v.max
+				fields[k+"_max"] = v.Upper()
 			}
 			if config.mean {
-				fields[k+"_mean"] = v.mean
+				fields[k+"_mean"] = v.Mean()
 			}
 			if config.sum {
-				fields[k+"_sum"] = v.sum
+				fields[k+"_sum"] = v.Sum()
 			}
 
-			//v.count always >=1
-			if v.count > 1 {
-				variance := v.M2 / (v.count - 1)
+			for _, p := range config.percentiles {
+				fields[k+"_p"+strconv.Itoa(p)] = v.Percentile(p)
+			}
 
+			// backward compatibility
+			if v.Count() > 1 {
 				if config.variance {
-					fields[k+"_s2"] = variance
+					fields[k+"_s2"] = v.Variance()
 				}
 				if config.stdev {
-					fields[k+"_stdev"] = math.Sqrt(variance)
+					fields[k+"_stdev"] = v.Stddev()
 				}
 			}
-			//if count == 1 StdDev = infinite => so I won't send data
 		}
 
 		if len(fields) > 0 {
@@ -177,13 +147,24 @@ func (m *BasicStats) Push(acc telegraf.Accumulator) {
 	}
 }
 
-func parseStats(names []string) *configuredStats {
+func parseStats(stats []string) configuredStats {
 
-	parsed := &configuredStats{}
+	PRECENTILE_PATTERN := regexp.MustCompile(`^p([0-9]|[1-9][0-9]|100)$`)
 
-	for _, name := range names {
+	parsed := configuredStats{}
 
-		switch name {
+	for _, stat := range stats {
+
+		// parse percentile stats, e.g. "p90" "p95"
+		match := PRECENTILE_PATTERN.FindStringSubmatch(stat)
+		if len(match) >= 2 {
+			if p, err := strconv.Atoi(match[1]); err == nil {
+				parsed.percentiles = append(parsed.percentiles, p)
+				continue
+			}
+		}
+
+		switch stat {
 
 		case "count":
 			parsed.count = true
@@ -201,40 +182,47 @@ func parseStats(names []string) *configuredStats {
 			parsed.sum = true
 
 		default:
-			log.Printf("W! Unrecognized basic stat '%s', ignoring", name)
+			log.Printf("W! Unrecognized basic stat '%s', ignoring", stat)
 		}
 	}
 
 	return parsed
 }
 
-func defaultStats() *configuredStats {
+func (m *BasicStats) getConfiguredStatsForField(field string) configuredStats {
+	DEFAULT_FIELD := "*"
+	DEFAULT_STATS := []string{"count", "min", "max", "mean", "s2", "stdev"}
 
-	defaults := &configuredStats{}
+	if m.configs == nil {
 
-	defaults.count = true
-	defaults.min = true
-	defaults.max = true
-	defaults.mean = true
-	defaults.variance = true
-	defaults.stdev = true
-	defaults.sum = false
+		if m.Fields == nil {
+			m.Fields = make(map[string][]string)
 
-	return defaults
-}
+			if m.Stats == nil {
+				// neither m.Fileds nor m.Stats provided, use DEFAULT_STATS
+				m.Fields[DEFAULT_FIELD] = DEFAULT_STATS
+			} else {
+				// make m.Stats default for all fields
+				m.Fields[DEFAULT_FIELD] = m.Stats
+			}
+		}
+		// m.Fields provided, m.Stats ignored
 
-func getConfiguredStats(m *BasicStats) *configuredStats {
+		m.configs = make(map[string]configuredStats)
 
-	if m.statsConfig == nil {
-
-		if m.Stats == nil {
-			m.statsConfig = defaultStats()
-		} else {
-			m.statsConfig = parseStats(m.Stats)
+		for k, stats := range m.Fields {
+			m.configs[k] = parseStats(stats)
 		}
 	}
 
-	return m.statsConfig
+	if _, ok := m.configs[field]; !ok {
+		// field-specfic stats not found, fallback to DEFAULT_FIELD
+		field = DEFAULT_FIELD
+	}
+	// it's OK if DEFAULT_FIELD is not specified, the return below won't
+	// result in any error or aggregated field, which is what we desired
+
+	return m.configs[field]
 }
 
 func (m *BasicStats) Reset() {
